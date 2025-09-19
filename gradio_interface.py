@@ -1,4 +1,7 @@
 import gradio as gr
+import logging
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Helper Functions
@@ -102,15 +105,22 @@ def load_train_with_prefix(project: str):
 # =============================================================================
 # NEW FUNCTION: Combine Transcribe Folders into One Dataset Folder
 # =============================================================================
-def export_dataset(project: str):
+def export_dataset(project: str, higgs_format: bool = False, speaker_id: str = "", gender: str = "unknown"):
     """
     Combine all folders (and any files directly inside) in the project's 'transcribe'
     folder into a single folder named '<project>_dataset'.
     If files from different subfolders share the same name, they are renamed by
     prefixing with the source folder name.
+    
+    If higgs_format is True, creates Higgs Audio compatible format with:
+    - Speaker-named files (speaker_id_000000.wav, speaker_id_000000.txt)
+    - metadata.json with duration and sample information
     """
     if not project:
         return "No project selected."
+    
+    if higgs_format and not speaker_id.strip():
+        return "Speaker ID is required for Higgs format export."
     
     project = os.path.basename(project)
     project_base = DATASETS_FOLDER / project
@@ -120,34 +130,158 @@ def export_dataset(project: str):
         return "Transcribe folder not found in project."
     
     target_folder = project_base / f"{project}_dataset"
-    wav_folder = target_folder / "wavs"
-    try:
-        target_folder.mkdir(parents=True, exist_ok=False)
-        wav_folder.mkdir(parents=True, exist_ok=False)
-    except:
-        raise gr.Error(f"Please remove existing exported dataset folder inside of {project} and try again.")
     
+    if higgs_format:
+        try:
+            target_folder.mkdir(parents=True, exist_ok=False)
+        except:
+            raise gr.Error(f"Please remove existing exported dataset folder inside of {project} and try again.")
+        
+        return export_higgs_format(project, target_folder, transcribe_folder, train_text_path, speaker_id.strip(), gender)
+    else:
+        wav_folder = target_folder / "wavs"
+        try:
+            target_folder.mkdir(parents=True, exist_ok=False)
+            wav_folder.mkdir(parents=True, exist_ok=False)
+        except:
+            raise gr.Error(f"Please remove existing exported dataset folder inside of {project} and try again.")
+        
+        file_count = 0
+        for item in transcribe_folder.iterdir():
+            if item.is_dir():
+                for f in item.iterdir():
+                    if f.is_file() and "stitched" not in f.name:
+                        target_file = wav_folder / f.name
+                        if target_file.exists():
+                            target_file = wav_folder / f"{item.name}_{f.name}"
+                        shutil.copy(str(f), str(target_file))
+                        file_count += 1
+            elif item.is_file() and "stitched" not in item.name:
+                target_file = wav_folder / item.name
+                if target_file.exists():
+                    target_file = wav_folder / f"transcribe_{item.name}"
+                shutil.copy(str(item), str(target_file))
+                file_count += 1
+                
+        if train_text_path.exists():
+            shutil.copy(str(train_text_path), str(target_folder / "train.txt"))
+
+        return f"Combined {file_count} audio files into folder '{target_folder.name}'."
+
+def export_higgs_format(project: str, target_folder, transcribe_folder, train_text_path, speaker_id: str, gender: str = "unknown"):
+    """
+    Export dataset in Higgs Audio format with:
+    - Speaker-named files (speaker_id_000000.wav, speaker_id_000000.txt)
+    - metadata.json with sample information and durations
+    """
+    import json
+    import subprocess
+    from pathlib import Path
+    
+    if not train_text_path.exists():
+        return "train.txt file not found. Please generate transcription first."
+    
+    # Read train.txt to get transcript mappings
+    transcript_map = {}
+    with open(train_text_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if '|' in line:
+                filename, transcript = line.strip().split('|', 1)
+                transcript_map[filename.strip()] = transcript.strip()
+    
+    # Collect all audio files and create speaker-named files
+    audio_files = []
+    samples = []
     file_count = 0
+    total_duration = 0.0
+    
+    # Process files from transcribe folder
     for item in transcribe_folder.iterdir():
         if item.is_dir():
             for f in item.iterdir():
-                if f.is_file() and "stitched" not in f.name:
-                    target_file = wav_folder / f.name
-                    if target_file.exists():
-                        target_file = wav_folder / f"{item.name}_{f.name}"
-                    shutil.copy(str(f), str(target_file))
-                    file_count += 1
-        elif item.is_file() and "stitched" not in item.name:
-            target_file = wav_folder / item.name
-            if target_file.exists():
-                target_file = wav_folder / f"transcribe_{item.name}"
-            shutil.copy(str(item), str(target_file))
-            file_count += 1
-            
-    if train_text_path.exists():
-        shutil.copy(str(train_text_path), str(target_folder / "train.txt"))
-
-    return f"Combined {file_count} audio files into folder '{target_folder.name}'."
+                if f.is_file() and f.suffix.lower() in ['.wav', '.mp3', '.ogg', '.m4a'] and "stitched" not in f.name:
+                    audio_files.append(f)
+        elif item.is_file() and item.suffix.lower() in ['.wav', '.mp3', '.ogg', '.m4a'] and "stitched" not in item.name:
+            audio_files.append(item)
+    
+    # Sort files to ensure consistent numbering
+    audio_files.sort(key=lambda x: x.name)
+    
+    for i, audio_file in enumerate(audio_files):
+        # Generate speaker-formatted names
+        sample_id = f"{speaker_id}_{i:06d}"
+        wav_filename = f"{sample_id}.wav"
+        txt_filename = f"{sample_id}.txt"
+        
+        # Copy and rename audio file
+        target_audio_path = target_folder / wav_filename
+        shutil.copy(str(audio_file), str(target_audio_path))
+        
+        # Get transcript for this file
+        original_filename = audio_file.name
+        transcript = transcript_map.get(original_filename, "")
+        if not transcript:
+            # Try without extension
+            name_without_ext = audio_file.stem
+            transcript = transcript_map.get(name_without_ext, "")
+        
+        # Create individual transcript file
+        txt_path = target_folder / txt_filename
+        with open(txt_path, 'w', encoding='utf-8') as f:
+            f.write(transcript)
+        
+        # Get duration using ffprobe
+        try:
+            result = subprocess.run([
+                'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+                '-of', 'csv=p=0', str(target_audio_path)
+            ], capture_output=True, text=True, check=True)
+            duration = float(result.stdout.strip())
+        except (subprocess.CalledProcessError, ValueError, FileNotFoundError):
+            # Fallback: estimate duration or set to 0
+            duration = 0.0
+        
+        total_duration += duration
+        
+        # Create sample metadata
+        sample_data = {
+            "id": sample_id,
+            "audio_file": wav_filename,
+            "transcript_file": txt_filename,
+            "duration": round(duration, 2),
+            "speaker_id": speaker_id,
+            "speaker_name": speaker_id.replace('_speaker', '').capitalize(),
+            "scene": "",
+            "emotion": "",
+            "language": "en",  # Default to English, could be made configurable
+            "gender": gender,
+            "quality_score": 1.0,
+            "original_audio_path": str(audio_file),
+            "user_instruction": "<audio> /translate",
+            "task_type": "audio_generation"
+        }
+        samples.append(sample_data)
+        file_count += 1
+    
+    # Create metadata.json
+    metadata = {
+        "dataset_info": {
+            "total_samples": file_count,
+            "speakers": [speaker_id],
+            "languages": ["en"],
+            "total_duration": round(total_duration, 2),
+            "avg_duration": round(total_duration / file_count, 2) if file_count > 0 else 0,
+            "created_from": [str(train_text_path)]
+        },
+        "samples": samples
+    }
+    
+    # Write metadata.json
+    metadata_path = target_folder / "metadata.json"
+    with open(metadata_path, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+    
+    return f"Exported {file_count} files in Higgs format to '{target_folder.name}' with metadata.json (Total duration: {total_duration:.1f}s)"
 
 # =============================================================================
 # NEW FUNCTION: Combine All Audio Samples (with batching and multiprocessing)
@@ -298,7 +432,64 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
             shutil.copy(str(f), str(uncombined_folder / f.name))
             f.unlink()
 
-def transcribe_interface(project: str, language, silence_duration, purge_long_segments, max_segment_length):
+def get_resume_status(project: str):
+    """
+    Check if transcription can be resumed and return the status info.
+    Returns: (can_resume: bool, processed_files: list, starting_index: int, message: str)
+    """
+    if not project:
+        return False, [], 1, "No project selected."
+    
+    project_base = DATASETS_FOLDER / project
+    transcribe_folder = project_base / "transcribe"
+    train_text_folder = project_base / "train_text_files"
+    train_txt_path = train_text_folder / "train.txt"
+    wavs_folder = project_base / "wavs"
+    
+    # Get all audio files
+    audio_files = [
+        f.stem for ext in VALID_AUDIO_EXTENSIONS
+        for f in wavs_folder.glob(f"*{ext}")
+    ] if wavs_folder.exists() else []
+    
+    # Check if previous run exists
+    if not transcribe_folder.exists() or not train_txt_path.exists():
+        return False, [], 1, "No previous transcription run found."
+    
+    # Find processed files by checking transcribe subfolders
+    processed_files = [
+        folder.name for folder in transcribe_folder.iterdir()
+        if folder.is_dir()
+    ]
+    
+    # Get highest segment number from train.txt to determine starting index
+    starting_index = 1
+    if train_txt_path.exists():
+        try:
+            with open(train_txt_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                if lines:
+                    # Parse the last line to get the highest segment number
+                    last_line = lines[-1].strip()
+                    if "|" in last_line:
+                        filename_part = last_line.split("|")[0].strip()
+                        if filename_part.startswith("seg") and filename_part.endswith(".wav"):
+                            # Extract number from segXXXX.wav
+                            seg_num = filename_part.replace("seg", "").replace(".wav", "")
+                            starting_index = int(seg_num) + 1
+        except (ValueError, IndexError, FileNotFoundError):
+            starting_index = 1
+    
+    # Find unprocessed files
+    unprocessed_files = [f for f in audio_files if f not in processed_files]
+    
+    if not unprocessed_files:
+        return False, processed_files, starting_index, f"All {len(audio_files)} files have been processed."
+    
+    message = f"Found previous run: {len(processed_files)} files processed, {len(unprocessed_files)} remaining. Next segment: {starting_index}"
+    return True, processed_files, starting_index, message
+
+def transcribe_interface(project: str, language, silence_duration, purge_long_segments, max_segment_length, resume_mode=False):
     if not project:
         return "No project selected."
     
@@ -307,37 +498,59 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
     if not wavs_folder.exists():
         return "No audio files uploaded. Please upload files into the 'wavs' folder."
     
-    # Create and use the transcribe folder
     transcribe_folder = project_base / "transcribe"
-    try:
-        transcribe_folder.mkdir(parents=True, exist_ok=False)
-    except Exception as e:
-        raise gr.Error(f"Transcribe folder already exists. Please remove previous run and try again.")
-    
     train_text_folder = project_base / "train_text_files"
     train_txt_path = train_text_folder / "train.txt"
     
-    # Determine starting index by scanning existing train.txt entries.
-    starting_index = 1
-    if train_txt_path.exists():
-        raise gr.Error(f"Train text file already exists. Please remove previous run and try again.")
+    # Handle resume vs new run
+    if resume_mode:
+        can_resume, processed_files, starting_index, status_msg = get_resume_status(project)
+        if not can_resume:
+            return f"Cannot resume: {status_msg}"
+        
+        logger.info(f"Resuming transcription: {status_msg}")
+        
+        # Get unprocessed files
+        audio_files = [
+            f for ext in VALID_AUDIO_EXTENSIONS
+            for f in wavs_folder.glob(f"*{ext}")
+            if f.stem not in processed_files
+        ]
+        
+    else:
+        # New run - check for conflicts
+        if transcribe_folder.exists():
+            raise gr.Error(f"Transcribe folder already exists. Please remove previous run and try again, or use Resume mode.")
+        
+        if train_txt_path.exists():
+            raise gr.Error(f"Train text file already exists. Please remove previous run and try again, or use Resume mode.")
+        
+        # Create folders
+        transcribe_folder.mkdir(parents=True, exist_ok=True)
+        train_text_folder.mkdir(parents=True, exist_ok=True)
+        
+        starting_index = 1
+        audio_files = [
+            f for ext in VALID_AUDIO_EXTENSIONS
+            for f in wavs_folder.glob(f"*{ext}")
+        ]
     
-    audio_files = [
-        f
-        for ext in VALID_AUDIO_EXTENSIONS
-        for f in wavs_folder.glob(f"*{ext}")
-    ]
     if not audio_files:
-        return "No valid audio files found in the 'wavs' folder."
+        if resume_mode:
+            return "Resume complete: All files have been processed."
+        else:
+            return "No valid audio files found in the 'wavs' folder."
     
     try:
         model = transcriber.load_whisperx_model("large-v3")
-        for audio_file in audio_files:
-            # Save segments and outputs in the transcribe folder.
+        
+        for i, audio_file in enumerate(audio_files, 1):
+            logger.info(f"Processing file {i}/{len(audio_files)}: {audio_file.name}")
+            
             starting_index = transcriber.process_audio_file(
                 audio_file=audio_file,
                 model=model,
-                output_base=transcribe_folder,  # Updated to use transcribe folder
+                output_base=transcribe_folder,
                 train_txt_path=train_txt_path,
                 silence_duration_sec=silence_duration,
                 purge_long_segments=purge_long_segments,
@@ -345,11 +558,15 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
                 starting_index=starting_index,
                 language=language
             )
+            
         if train_txt_path.exists():
             with open(train_txt_path, "r", encoding="utf-8") as f:
-                return f.read()
+                content = f.read()
+                final_count = len([line for line in content.split('\n') if '|' in line])
+                return f"Transcription complete! Generated {final_count} entries.\n\n{content}"
         else:
             return "No train.txt file was generated."
+            
     except Exception as e:
         return f"Error during transcription: {str(e)}"
 
@@ -569,6 +786,18 @@ def setup_gradio():
                 gr.Markdown("### Transcribe All Audio Files in the Project (wavs)")
                 gr.Markdown("For optimal speeds, ensure that all files in the 'wavs' folder are 10 minutes or more in length. If not, use **Combine Small Samples** to combine them.")
                 gr.Markdown("**NOTE:** It is HIGHLY suggested that audio has no background noise or music.  If it does, running through a background remover like UVR or something similar is necessary before transcribing.")
+                
+                # Resume status section
+                with gr.Row():
+                    check_resume_button = gr.Button("Check Resume Status")
+                    resume_status = gr.Textbox(label="Resume Status", interactive=False)
+                
+                check_resume_button.click(
+                    fn=lambda project: get_resume_status(project)[3],
+                    inputs=projects_dropdown,
+                    outputs=resume_status,
+                )
+                
                 with gr.Row():
                     language = gr.Dropdown(label="Language", choices=WHISPER_LANGUAGES,
                                             value="en", interactive=True)
@@ -576,12 +805,21 @@ def setup_gradio():
                 with gr.Row():
                     purge_checkbox = gr.Checkbox(label="Purge segments longer than threshold", value=False)
                     max_segment_length_slider = gr.Slider(label="Max Segment Length (seconds)", minimum=1, maximum=60, value=12, step=1)
-                transcribe_button = gr.Button("Transcribe")
-                move_previous_run_button = gr.Button("Move Previous Run")
+                
+                with gr.Row():
+                    transcribe_button = gr.Button("Start New Transcription", variant="primary")
+                    resume_button = gr.Button("Resume Previous Run", variant="secondary")
+                    move_previous_run_button = gr.Button("Archive Previous Run")
+                
                 transcribe_output = gr.Textbox(label="train.txt Content", lines=10)
                 
                 transcribe_button.click(
-                    fn=transcribe_interface,
+                    fn=lambda proj, lang, silence, purge, max_len: transcribe_interface(proj, lang, silence, purge, max_len, resume_mode=False),
+                    inputs=[projects_dropdown, language, silence_duration, purge_checkbox, max_segment_length_slider],
+                    outputs=transcribe_output,
+                )
+                resume_button.click(
+                    fn=lambda proj, lang, silence, purge, max_len: transcribe_interface(proj, lang, silence, purge, max_len, resume_mode=True),
                     inputs=[projects_dropdown, language, silence_duration, purge_checkbox, max_segment_length_slider],
                     outputs=transcribe_output,
                 )
@@ -679,12 +917,25 @@ def setup_gradio():
             with gr.Tab("Export Dataset"):
                 gr.Markdown("### Export All Transcribe Folders into a Single Dataset Folder")
                 gr.Markdown("This will copy all files from subfolders (and files directly in the folder) of the project's 'transcribe' folder into a single folder named '<project>_dataset'.")
+                
+                higgs_format_checkbox = gr.Checkbox(label="Export in Higgs format", value=False, info="Generate metadata.json and speaker-named files for Higgs Audio training")
+                
+                with gr.Row(visible=False) as higgs_options:
+                    speaker_id_input = gr.Textbox(label="Speaker ID", placeholder="e.g., alma_speaker, melina_speaker", info="Used for Higgs format file naming", scale=2)
+                    gender_dropdown = gr.Dropdown(choices=["male", "female", "unknown"], value="unknown", label="Gender", scale=1)
+                
                 export_dataset_button = gr.Button("Export Dataset")
                 export_dataset_status = gr.Textbox(label="Status", lines=2)
                 
+                higgs_format_checkbox.change(
+                    fn=lambda x: gr.update(visible=x),
+                    inputs=higgs_format_checkbox,
+                    outputs=higgs_options,
+                )
+                
                 export_dataset_button.click(
                     fn=export_dataset,
-                    inputs=projects_dropdown,
+                    inputs=[projects_dropdown, higgs_format_checkbox, speaker_id_input, gender_dropdown],
                     outputs=export_dataset_status,
                 )
 
