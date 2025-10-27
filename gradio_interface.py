@@ -105,68 +105,78 @@ def load_train_with_prefix(project: str):
 # =============================================================================
 # NEW FUNCTION: Combine Transcribe Folders into One Dataset Folder
 # =============================================================================
-def export_dataset(project: str, higgs_format: bool = False, speaker_id: str = "", gender: str = "unknown"):
+def export_dataset(project: str, export_format: str = "Base", speaker_id: str = "", gender: str = "unknown",
+                   vibevoice_jsonl_name: str = ""):
     """
     Combine all folders (and any files directly inside) in the project's 'transcribe'
-    folder into a single folder named '<project>_dataset'.
-    If files from different subfolders share the same name, they are renamed by
-    prefixing with the source folder name.
-    
-    If higgs_format is True, creates Higgs Audio compatible format with:
-    - Speaker-named files (speaker_id_000000.wav, speaker_id_000000.txt)
-    - metadata.json with duration and sample information
+    folder into export-format-specific dataset structures.
     """
     if not project:
         return "No project selected."
     
-    if higgs_format and not speaker_id.strip():
-        return "Speaker ID is required for Higgs format export."
-    
     project = os.path.basename(project)
+    export_format = (export_format or "Base").strip().lower()
+    
     project_base = DATASETS_FOLDER / project
     transcribe_folder = project_base / "transcribe"
     train_text_path = project_base / "train_text_files" / "train.txt"
     if not transcribe_folder.exists():
         return "Transcribe folder not found in project."
     
-    target_folder = project_base / f"{project}_dataset"
-    
-    if higgs_format:
+    if export_format == "higgs":
+        if not speaker_id.strip():
+            return "Speaker ID is required for Higgs format export."
+        target_folder = project_base / f"{project}_dataset"
         try:
             target_folder.mkdir(parents=True, exist_ok=False)
         except:
             raise gr.Error(f"Please remove existing exported dataset folder inside of {project} and try again.")
-        
         return export_higgs_format(project, target_folder, transcribe_folder, train_text_path, speaker_id.strip(), gender)
-    else:
-        wav_folder = target_folder / "wavs"
+    
+    if export_format == "vibevoice":
+        target_folder = project_base / f"{project}_vibevoice_dataset"
         try:
             target_folder.mkdir(parents=True, exist_ok=False)
-            wav_folder.mkdir(parents=True, exist_ok=False)
         except:
-            raise gr.Error(f"Please remove existing exported dataset folder inside of {project} and try again.")
-        
-        file_count = 0
-        for item in transcribe_folder.iterdir():
-            if item.is_dir():
-                for f in item.iterdir():
-                    if f.is_file() and "stitched" not in f.name:
-                        target_file = wav_folder / f.name
-                        if target_file.exists():
-                            target_file = wav_folder / f"{item.name}_{f.name}"
-                        shutil.copy(str(f), str(target_file))
-                        file_count += 1
-            elif item.is_file() and "stitched" not in item.name:
-                target_file = wav_folder / item.name
-                if target_file.exists():
-                    target_file = wav_folder / f"transcribe_{item.name}"
-                shutil.copy(str(item), str(target_file))
-                file_count += 1
-                
-        if train_text_path.exists():
-            shutil.copy(str(train_text_path), str(target_folder / "train.txt"))
+            raise gr.Error(f"Please remove existing exported vibevoice dataset folder inside of {project} and try again.")
+        return export_vibevoice_format(
+            project=project,
+            target_folder=target_folder,
+            transcribe_folder=transcribe_folder,
+            train_text_path=train_text_path,
+            jsonl_name=vibevoice_jsonl_name.strip(),
+        )
 
-        return f"Combined {file_count} audio files into folder '{target_folder.name}'."
+    # Base export
+    target_folder = project_base / f"{project}_dataset"
+    wav_folder = target_folder / "wavs"
+    try:
+        target_folder.mkdir(parents=True, exist_ok=False)
+        wav_folder.mkdir(parents=True, exist_ok=False)
+    except:
+        raise gr.Error(f"Please remove existing exported dataset folder inside of {project} and try again.")
+    
+    file_count = 0
+    for item in transcribe_folder.iterdir():
+        if item.is_dir():
+            for f in item.iterdir():
+                if f.is_file() and "stitched" not in f.name:
+                    target_file = wav_folder / f.name
+                    if target_file.exists():
+                        target_file = wav_folder / f"{item.name}_{f.name}"
+                    shutil.copy(str(f), str(target_file))
+                    file_count += 1
+        elif item.is_file() and "stitched" not in item.name:
+            target_file = wav_folder / item.name
+            if target_file.exists():
+                target_file = wav_folder / f"transcribe_{item.name}"
+            shutil.copy(str(item), str(target_file))
+            file_count += 1
+            
+    if train_text_path.exists():
+        shutil.copy(str(train_text_path), str(target_folder / "train.txt"))
+
+    return f"Combined {file_count} audio files into folder '{target_folder.name}'."
 
 def export_higgs_format(project: str, target_folder, transcribe_folder, train_text_path, speaker_id: str, gender: str = "unknown"):
     """
@@ -282,6 +292,69 @@ def export_higgs_format(project: str, target_folder, transcribe_folder, train_te
         json.dump(metadata, f, indent=2, ensure_ascii=False)
     
     return f"Exported {file_count} files in Higgs format to '{target_folder.name}' with metadata.json (Total duration: {total_duration:.1f}s)"
+
+def export_vibevoice_format(project: str, target_folder, transcribe_folder, train_text_path, jsonl_name: str):
+    """
+    Export dataset in Vibevoice format:
+    - Flat folder of sequentially named wav files (<prefix>_000000.wav, ...)
+    - JSONL file containing {"text": "Speaker 0: ...", "audio": "<dataset_folder>/<filename>"}
+    """
+    import json
+    import posixpath
+
+    if not train_text_path.exists():
+        return "train.txt file not found. Please generate transcription first."
+
+    transcript_map = {}
+    with open(train_text_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if '|' in line:
+                filename, transcript = line.strip().split('|', 1)
+                transcript_map[filename.strip()] = transcript.strip()
+
+    audio_files = []
+    for item in transcribe_folder.iterdir():
+        if item.is_dir():
+            for f in item.iterdir():
+                if f.is_file() and f.suffix.lower() in ['.wav', '.mp3', '.ogg', '.m4a'] and "stitched" not in f.name:
+                    audio_files.append(f)
+        elif item.is_file() and item.suffix.lower() in ['.wav', '.mp3', '.ogg', '.m4a'] and "stitched" not in item.name:
+            audio_files.append(item)
+
+    if not audio_files:
+        return "No audio files found for export."
+
+    audio_files.sort(key=lambda x: x.name)
+
+    prefix = "vibevoice"
+    dataset_folder_name = target_folder.name
+    jsonl_basename = jsonl_name if jsonl_name else f"{project}_train"
+    jsonl_basename = jsonl_basename.replace(" ", "_")
+    jsonl_path = target_folder / f"{jsonl_basename}.jsonl"
+
+    entries = []
+    for idx, audio_file in enumerate(audio_files):
+        new_name = f"{prefix}_{idx:06d}{audio_file.suffix.lower()}"
+        target_audio_path = target_folder / new_name
+        shutil.copy(str(audio_file), str(target_audio_path))
+
+        original_filename = audio_file.name
+        transcript = transcript_map.get(original_filename, "")
+        if not transcript:
+            name_without_ext = audio_file.stem
+            transcript = transcript_map.get(name_without_ext, "")
+
+        transcript = transcript.strip()
+        text = f"Speaker 0: {transcript}" if transcript else "Speaker 0: "
+        audio_rel_path = posixpath.join(dataset_folder_name, new_name)
+        entries.append({"text": text, "audio": audio_rel_path})
+
+    with open(jsonl_path, 'w', encoding='utf-8') as f:
+        for entry in entries:
+            json.dump(entry, f, ensure_ascii=False)
+            f.write("\n")
+
+    return f"Exported {len(entries)} files in Vibevoice format to '{target_folder.name}' with {jsonl_path.name}"
 
 # =============================================================================
 # NEW FUNCTION: Combine All Audio Samples (with batching and multiprocessing)
@@ -952,24 +1025,35 @@ def setup_gradio():
                 gr.Markdown("### Export All Transcribe Folders into a Single Dataset Folder")
                 gr.Markdown("This will copy all files from subfolders (and files directly in the folder) of the project's 'transcribe' folder into a single folder named '<project>_dataset'.")
                 
-                higgs_format_checkbox = gr.Checkbox(label="Export in Higgs format", value=False, info="Generate metadata.json and speaker-named files for Higgs Audio training")
-                
+                export_format_dropdown = gr.Dropdown(label="Export Format", choices=["Base", "Higgs", "Vibevoice"], value="Base")
+
                 with gr.Row(visible=False) as higgs_options:
                     speaker_id_input = gr.Textbox(label="Speaker ID", placeholder="e.g., alma_speaker, melina_speaker", info="Used for Higgs format file naming", scale=2)
                     gender_dropdown = gr.Dropdown(choices=["male", "female", "unknown"], value="unknown", label="Gender", scale=1)
-                
+
+                with gr.Row(visible=False) as vibevoice_options:
+                    vibevoice_jsonl_input = gr.Textbox(label="JSONL Name", placeholder="e.g., vibevoice_train", info="Filename (without extension) for the JSONL manifest", scale=2)
+
                 export_dataset_button = gr.Button("Export Dataset")
                 export_dataset_status = gr.Textbox(label="Status", lines=2)
                 
-                higgs_format_checkbox.change(
-                    fn=lambda x: gr.update(visible=x),
-                    inputs=higgs_format_checkbox,
-                    outputs=higgs_options,
+                def update_export_options(format_choice):
+                    is_higgs = format_choice == "Higgs"
+                    is_vibevoice = format_choice == "Vibevoice"
+                    return (
+                        gr.update(visible=is_higgs),
+                        gr.update(visible=is_vibevoice),
+                    )
+                
+                export_format_dropdown.change(
+                    fn=update_export_options,
+                    inputs=export_format_dropdown,
+                    outputs=[higgs_options, vibevoice_options],
                 )
                 
                 export_dataset_button.click(
                     fn=export_dataset,
-                    inputs=[projects_dropdown, higgs_format_checkbox, speaker_id_input, gender_dropdown],
+                    inputs=[projects_dropdown, export_format_dropdown, speaker_id_input, gender_dropdown, vibevoice_jsonl_input],
                     outputs=export_dataset_status,
                 )
 
