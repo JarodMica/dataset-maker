@@ -489,7 +489,9 @@ def get_resume_status(project: str):
     message = f"Found previous run: {len(processed_files)} files processed, {len(unprocessed_files)} remaining. Next segment: {starting_index}"
     return True, processed_files, starting_index, message
 
-def transcribe_interface(project: str, language, silence_duration, purge_long_segments, max_segment_length, resume_mode=False):
+def transcribe_interface(project: str, language, silence_duration, purge_long_segments,
+                         max_segment_length, verbose_mode=False, resume_mode=False,
+                         slice_method_label="Silence Slicer"):
     if not project:
         return "No project selected."
     
@@ -501,6 +503,17 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
     transcribe_folder = project_base / "transcribe"
     train_text_folder = project_base / "train_text_files"
     train_txt_path = train_text_folder / "train.txt"
+    
+    slice_options = globals().get("SLICE_METHOD_OPTIONS", {})
+    slice_method = transcriber.SILENCE_SLICE_METHOD
+    if isinstance(slice_method_label, str):
+        mapped_value = slice_options.get(slice_method_label)
+        if mapped_value:
+            slice_method = mapped_value
+        elif slice_method_label.lower() in transcriber.VALID_SLICE_METHODS:
+            slice_method = slice_method_label.lower()
+    elif slice_method_label in transcriber.VALID_SLICE_METHODS:
+        slice_method = slice_method_label
     
     # Handle resume vs new run
     if resume_mode:
@@ -520,7 +533,9 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
     else:
         # New run - check for conflicts
         if transcribe_folder.exists():
-            raise gr.Error(f"Transcribe folder already exists. Please remove previous run and try again, or use Resume mode.")
+            has_transcribe_outputs = any(transcribe_folder.iterdir())
+            if has_transcribe_outputs:
+                raise gr.Error(f"Transcribe folder already exists. Please remove previous run and try again, or use Resume mode.")
         
         if train_txt_path.exists():
             raise gr.Error(f"Train text file already exists. Please remove previous run and try again, or use Resume mode.")
@@ -544,6 +559,8 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
     try:
         model = transcriber.load_whisperx_model("large-v3")
         
+        logger.info(f"Starting transcription using slice method '{slice_method}'.")
+        
         for i, audio_file in enumerate(audio_files, 1):
             logger.info(f"Processing file {i}/{len(audio_files)}: {audio_file.name}")
             
@@ -552,13 +569,15 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
                 model=model,
                 output_base=transcribe_folder,
                 train_txt_path=train_txt_path,
-                silence_duration_sec=silence_duration,
-                purge_long_segments=purge_long_segments,
-                max_segment_length=max_segment_length,
-                starting_index=starting_index,
-                language=language
-            )
-            
+                    silence_duration_sec=silence_duration,
+                    purge_long_segments=purge_long_segments,
+                    max_segment_length=max_segment_length,
+                    verbose_mode=verbose_mode,
+                    starting_index=starting_index,
+                    language=language,
+                    slice_method=slice_method
+                )
+    
         if train_txt_path.exists():
             with open(train_txt_path, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -801,10 +820,25 @@ def setup_gradio():
                 with gr.Row():
                     language = gr.Dropdown(label="Language", choices=WHISPER_LANGUAGES,
                                             value="en", interactive=True)
+                    slice_method_dropdown = gr.Dropdown(
+                        label="Slicing Method",
+                        choices=list(SLICE_METHOD_OPTIONS.keys()),
+                        value=DEFAULT_SLICE_METHOD_LABEL,
+                        interactive=True,
+                    )
+                with gr.Row():
                     silence_duration = gr.Slider(label="Silence Duration (seconds)", minimum=1, maximum=10, value=6, step=1)
+                slice_method_dropdown.change(
+                    fn=lambda label: gr.update(
+                        interactive=(SLICE_METHOD_OPTIONS.get(label, str(label).lower()) == transcriber.SILENCE_SLICE_METHOD)
+                    ),
+                    inputs=slice_method_dropdown,
+                    outputs=silence_duration,
+                )
                 with gr.Row():
                     purge_checkbox = gr.Checkbox(label="Purge segments longer than threshold", value=False)
                     max_segment_length_slider = gr.Slider(label="Max Segment Length (seconds)", minimum=1, maximum=60, value=12, step=1)
+                verbose_checkbox = gr.Checkbox(label="Verbose (keep short/blank segments)", value=True)
                 
                 with gr.Row():
                     transcribe_button = gr.Button("Start New Transcription", variant="primary")
@@ -814,13 +848,13 @@ def setup_gradio():
                 transcribe_output = gr.Textbox(label="train.txt Content", lines=10)
                 
                 transcribe_button.click(
-                    fn=lambda proj, lang, silence, purge, max_len: transcribe_interface(proj, lang, silence, purge, max_len, resume_mode=False),
-                    inputs=[projects_dropdown, language, silence_duration, purge_checkbox, max_segment_length_slider],
+                    fn=lambda proj, lang, silence, purge, max_len, verbose, slice_choice: transcribe_interface(proj, lang, silence, purge, max_len, verbose, resume_mode=False, slice_method_label=slice_choice),
+                    inputs=[projects_dropdown, language, silence_duration, purge_checkbox, max_segment_length_slider, verbose_checkbox, slice_method_dropdown],
                     outputs=transcribe_output,
                 )
                 resume_button.click(
-                    fn=lambda proj, lang, silence, purge, max_len: transcribe_interface(proj, lang, silence, purge, max_len, resume_mode=True),
-                    inputs=[projects_dropdown, language, silence_duration, purge_checkbox, max_segment_length_slider],
+                    fn=lambda proj, lang, silence, purge, max_len, verbose, slice_choice: transcribe_interface(proj, lang, silence, purge, max_len, verbose, resume_mode=True, slice_method_label=slice_choice),
+                    inputs=[projects_dropdown, language, silence_duration, purge_checkbox, max_segment_length_slider, verbose_checkbox, slice_method_dropdown],
                     outputs=transcribe_output,
                 )
                 move_previous_run_button.click(
@@ -980,4 +1014,10 @@ if __name__ == "__main__":
     }
     VALID_AUDIO_EXTENSIONS = [".wav", ".mp3", ".m4a", ".opus", ".webm", ".mp4", ".ogg"]
     WHISPER_LANGUAGES = ["af","am","ar","as","az","ba","be","bg","bn","bo","br","bs","ca","cs","cy","da","de","el","en","es","et","eu","fa","fi","fo","fr","gl","gu","ha","haw","he","hi","hr","ht","hu","hy","id","is","it","ja","jw","ka","kk","km","kn","ko","la","lb","ln","lo","lt","lv","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","nl","nn","no","oc","pa","pl","ps","pt","ro","ru","sa","sd","si","sk","sl","sn","so","sq","sr","su","sv","sw","ta","te","tg","th","tk","tl","tr","tt","uk","ur","uz","vi","yi","yo","yue","zh"]
+    SLICE_METHOD_OPTIONS = {
+        "WhisperX Timestamps": transcriber.WHISPERX_SLICE_METHOD,
+        "Silence Slicer": transcriber.SILENCE_SLICE_METHOD,
+        
+    }
+    DEFAULT_SLICE_METHOD_LABEL = "WhisperX Timestamps"
     main()
