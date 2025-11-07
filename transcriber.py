@@ -9,6 +9,7 @@ import librosa
 import soundfile as sf
 import pysrt
 import whisperx
+import safe_globals  # Ensure torch safe globals are registered before model deserialization.
 import gc
 import time
 
@@ -17,7 +18,8 @@ from slicer2 import Slicer
 
 SILENCE_SLICE_METHOD = "silence"
 WHISPERX_SLICE_METHOD = "whisperx"
-VALID_SLICE_METHODS = {SILENCE_SLICE_METHOD, WHISPERX_SLICE_METHOD}
+EMILIA_PIPE_METHOD = "emilia_pipe"
+VALID_SLICE_METHODS = {SILENCE_SLICE_METHOD, WHISPERX_SLICE_METHOD, EMILIA_PIPE_METHOD}
 
 # WhisperX VAD refinement defaults
 WHISPERX_VAD_WINDOW_SEC = 0.03  # 30ms
@@ -408,7 +410,8 @@ def process_audio_file(audio_file, model, output_base, train_txt_path, silence_d
     if method not in VALID_SLICE_METHODS:
         print(f"DEBUG: Unknown slice method '{slice_method}'. Falling back to silence slicer.")
         method = SILENCE_SLICE_METHOD
-
+    if method == EMILIA_PIPE_METHOD:
+        raise ValueError("Emilia Pipe slicing is handled externally via the Emilia pipeline.")
     if method == SILENCE_SLICE_METHOD:
         segment_records, next_index = _slice_audio_with_silence(
             audio_file=audio_file,
