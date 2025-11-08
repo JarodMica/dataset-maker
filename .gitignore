@@ -11,3 +11,13 @@ wheels/
 venv/
 
 transcribed outputs
+
+Amphion/
+Emilia/config.json
+.claude/
+.vscode/
+Agent_Instructions/
+CLAUDE.md
+local/
+*ffmpeg*
+*__pycache__*

@@ -1,5 +1,10 @@
 import gradio as gr
 import logging
+import json
+import os
+import shutil
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -105,68 +110,78 @@ def load_train_with_prefix(project: str):
 # =============================================================================
 # NEW FUNCTION: Combine Transcribe Folders into One Dataset Folder
 # =============================================================================
-def export_dataset(project: str, higgs_format: bool = False, speaker_id: str = "", gender: str = "unknown"):
+def export_dataset(project: str, export_format: str = "Base", speaker_id: str = "", gender: str = "unknown",
+                   vibevoice_jsonl_name: str = ""):
     """
     Combine all folders (and any files directly inside) in the project's 'transcribe'
-    folder into a single folder named '<project>_dataset'.
-    If files from different subfolders share the same name, they are renamed by
-    prefixing with the source folder name.
-    
-    If higgs_format is True, creates Higgs Audio compatible format with:
-    - Speaker-named files (speaker_id_000000.wav, speaker_id_000000.txt)
-    - metadata.json with duration and sample information
+    folder into export-format-specific dataset structures.
     """
     if not project:
         return "No project selected."
     
-    if higgs_format and not speaker_id.strip():
-        return "Speaker ID is required for Higgs format export."
-    
     project = os.path.basename(project)
+    export_format = (export_format or "Base").strip().lower()
+    
     project_base = DATASETS_FOLDER / project
     transcribe_folder = project_base / "transcribe"
     train_text_path = project_base / "train_text_files" / "train.txt"
     if not transcribe_folder.exists():
         return "Transcribe folder not found in project."
     
-    target_folder = project_base / f"{project}_dataset"
-    
-    if higgs_format:
+    if export_format == "higgs":
+        if not speaker_id.strip():
+            return "Speaker ID is required for Higgs format export."
+        target_folder = project_base / f"{project}_dataset"
         try:
             target_folder.mkdir(parents=True, exist_ok=False)
         except:
             raise gr.Error(f"Please remove existing exported dataset folder inside of {project} and try again.")
-        
         return export_higgs_format(project, target_folder, transcribe_folder, train_text_path, speaker_id.strip(), gender)
-    else:
-        wav_folder = target_folder / "wavs"
+    
+    if export_format == "vibevoice":
+        target_folder = project_base / f"{project}_vibevoice_dataset"
         try:
             target_folder.mkdir(parents=True, exist_ok=False)
-            wav_folder.mkdir(parents=True, exist_ok=False)
         except:
-            raise gr.Error(f"Please remove existing exported dataset folder inside of {project} and try again.")
-        
-        file_count = 0
-        for item in transcribe_folder.iterdir():
-            if item.is_dir():
-                for f in item.iterdir():
-                    if f.is_file() and "stitched" not in f.name:
-                        target_file = wav_folder / f.name
-                        if target_file.exists():
-                            target_file = wav_folder / f"{item.name}_{f.name}"
-                        shutil.copy(str(f), str(target_file))
-                        file_count += 1
-            elif item.is_file() and "stitched" not in item.name:
-                target_file = wav_folder / item.name
-                if target_file.exists():
-                    target_file = wav_folder / f"transcribe_{item.name}"
-                shutil.copy(str(item), str(target_file))
-                file_count += 1
-                
-        if train_text_path.exists():
-            shutil.copy(str(train_text_path), str(target_folder / "train.txt"))
+            raise gr.Error(f"Please remove existing exported vibevoice dataset folder inside of {project} and try again.")
+        return export_vibevoice_format(
+            project=project,
+            target_folder=target_folder,
+            transcribe_folder=transcribe_folder,
+            train_text_path=train_text_path,
+            jsonl_name=vibevoice_jsonl_name.strip(),
+        )
 
-        return f"Combined {file_count} audio files into folder '{target_folder.name}'."
+    # Base export
+    target_folder = project_base / f"{project}_dataset"
+    wav_folder = target_folder / "wavs"
+    try:
+        target_folder.mkdir(parents=True, exist_ok=False)
+        wav_folder.mkdir(parents=True, exist_ok=False)
+    except:
+        raise gr.Error(f"Please remove existing exported dataset folder inside of {project} and try again.")
+    
+    file_count = 0
+    for item in transcribe_folder.iterdir():
+        if item.is_dir():
+            for f in item.iterdir():
+                if f.is_file() and "stitched" not in f.name:
+                    target_file = wav_folder / f.name
+                    if target_file.exists():
+                        target_file = wav_folder / f"{item.name}_{f.name}"
+                    shutil.copy(str(f), str(target_file))
+                    file_count += 1
+        elif item.is_file() and "stitched" not in item.name:
+            target_file = wav_folder / item.name
+            if target_file.exists():
+                target_file = wav_folder / f"transcribe_{item.name}"
+            shutil.copy(str(item), str(target_file))
+            file_count += 1
+            
+    if train_text_path.exists():
+        shutil.copy(str(train_text_path), str(target_folder / "train.txt"))
+
+    return f"Combined {file_count} audio files into folder '{target_folder.name}'."
 
 def export_higgs_format(project: str, target_folder, transcribe_folder, train_text_path, speaker_id: str, gender: str = "unknown"):
     """
@@ -282,6 +297,69 @@ def export_higgs_format(project: str, target_folder, transcribe_folder, train_te
         json.dump(metadata, f, indent=2, ensure_ascii=False)
     
     return f"Exported {file_count} files in Higgs format to '{target_folder.name}' with metadata.json (Total duration: {total_duration:.1f}s)"
+
+def export_vibevoice_format(project: str, target_folder, transcribe_folder, train_text_path, jsonl_name: str):
+    """
+    Export dataset in Vibevoice format:
+    - Flat folder of sequentially named wav files (<prefix>_000000.wav, ...)
+    - JSONL file containing {"text": "Speaker 0: ...", "audio": "<dataset_folder>/<filename>"}
+    """
+    import json
+    import posixpath
+
+    if not train_text_path.exists():
+        return "train.txt file not found. Please generate transcription first."
+
+    transcript_map = {}
+    with open(train_text_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if '|' in line:
+                filename, transcript = line.strip().split('|', 1)
+                transcript_map[filename.strip()] = transcript.strip()
+
+    audio_files = []
+    for item in transcribe_folder.iterdir():
+        if item.is_dir():
+            for f in item.iterdir():
+                if f.is_file() and f.suffix.lower() in ['.wav', '.mp3', '.ogg', '.m4a'] and "stitched" not in f.name:
+                    audio_files.append(f)
+        elif item.is_file() and item.suffix.lower() in ['.wav', '.mp3', '.ogg', '.m4a'] and "stitched" not in item.name:
+            audio_files.append(item)
+
+    if not audio_files:
+        return "No audio files found for export."
+
+    audio_files.sort(key=lambda x: x.name)
+
+    prefix = "vibevoice"
+    dataset_folder_name = target_folder.name
+    jsonl_basename = jsonl_name if jsonl_name else f"{project}_train"
+    jsonl_basename = jsonl_basename.replace(" ", "_")
+    jsonl_path = target_folder / f"{jsonl_basename}.jsonl"
+
+    entries = []
+    for idx, audio_file in enumerate(audio_files):
+        new_name = f"{prefix}_{idx:06d}{audio_file.suffix.lower()}"
+        target_audio_path = target_folder / new_name
+        shutil.copy(str(audio_file), str(target_audio_path))
+
+        original_filename = audio_file.name
+        transcript = transcript_map.get(original_filename, "")
+        if not transcript:
+            name_without_ext = audio_file.stem
+            transcript = transcript_map.get(name_without_ext, "")
+
+        transcript = transcript.strip()
+        text = f"Speaker 0: {transcript}" if transcript else "Speaker 0: "
+        audio_rel_path = posixpath.join(dataset_folder_name, new_name)
+        entries.append({"text": text, "audio": audio_rel_path})
+
+    with open(jsonl_path, 'w', encoding='utf-8') as f:
+        for entry in entries:
+            json.dump(entry, f, ensure_ascii=False)
+            f.write("\n")
+
+    return f"Exported {len(entries)} files in Vibevoice format to '{target_folder.name}' with {jsonl_path.name}"
 
 # =============================================================================
 # NEW FUNCTION: Combine All Audio Samples (with batching and multiprocessing)
@@ -489,7 +567,145 @@ def get_resume_status(project: str):
     message = f"Found previous run: {len(processed_files)} files processed, {len(unprocessed_files)} remaining. Next segment: {starting_index}"
     return True, processed_files, starting_index, message
 
-def transcribe_interface(project: str, language, silence_duration, purge_long_segments, max_segment_length, resume_mode=False):
+
+def load_emilia_progress(project_base: Path, project_name: str):
+    project_slug = Path(project_name).name
+    output_root = project_base / f"{project_slug}_emilia_dataset"
+    jsonl_path = output_root / f"{project_slug}_transcribed.jsonl"
+    output_root.mkdir(parents=True, exist_ok=True)
+    processed_bases: set[str] = set()
+    entry_count = 0
+
+    if jsonl_path.is_file():
+        with jsonl_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                clip_id = record.get("id", "")
+                base = clip_id.split("_W")[0] if "_W" in clip_id else ""
+                if not base:
+                    source = record.get("source")
+                    if source:
+                        base = Path(source).stem
+                if base:
+                    processed_bases.add(base)
+                entry_count += 1
+
+    settings_path = output_root / "emilia_settings.json"
+    saved_settings = {}
+    if settings_path.is_file():
+        try:
+            with settings_path.open("r", encoding="utf-8") as f:
+                saved_settings = json.load(f)
+        except Exception:
+            saved_settings = {}
+    if "hash_names" not in saved_settings and "anonymize" in saved_settings:
+        saved_settings["hash_names"] = bool(saved_settings.get("anonymize"))
+
+    return processed_bases, entry_count, output_root, jsonl_path, saved_settings, settings_path
+
+
+class EmiliaOutputWriter:
+    def __init__(
+        self,
+        project_name: str,
+        output_root: Path,
+        jsonl_path: Path,
+        settings_path: Path,
+        processed_bases: Optional[set[str]] = None,
+        *,
+        resume_mode: bool = False,
+        settings_to_save: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.project_name = project_name
+        self.output_root = output_root
+        self.jsonl_path = jsonl_path
+        self.settings_path = settings_path
+        self.resume_mode = resume_mode
+        self.processed_bases = set(processed_bases or set())
+        self.initial_processed = len(self.processed_bases)
+        self.new_segments = 0
+
+        if not resume_mode and self.output_root.exists():
+            shutil.rmtree(self.output_root)
+
+        self.output_root.mkdir(parents=True, exist_ok=True)
+        self.audio_dir = self.output_root / "audio"
+        self.audio_dir.mkdir(parents=True, exist_ok=True)
+
+        mode = "a" if resume_mode and self.jsonl_path.exists() else "w"
+        self._jsonl_handle = self.jsonl_path.open(mode, encoding="utf-8")
+
+        if settings_to_save is not None:
+            with self.settings_path.open("w", encoding="utf-8") as f:
+                json.dump(settings_to_save, f, indent=2)
+
+    def append(self, audio_path: Path, manifest_path: Path, segments: List[Dict[str, Any]]) -> None:
+        base_id = audio_path.stem
+        if self.resume_mode and base_id in self.processed_bases:
+            return
+
+        manifest_dir = manifest_path.parent
+        if not segments:
+            self.processed_bases.add(base_id)
+            return
+
+        for idx, segment in enumerate(segments):
+            src_file = manifest_dir / f"{manifest_dir.name}_{idx}.mp3"
+            if not src_file.is_file():
+                continue
+
+            clip_id = f"{manifest_dir.name}_W{idx:06d}"
+            dest_name = f"{clip_id}.mp3"
+            dest_file = self.audio_dir / dest_name
+            if dest_file.exists():
+                dest_file.unlink()
+            shutil.copy2(src_file, dest_file)
+
+            text = (segment.get("text") or "").strip()
+            speaker_label = str(segment.get("speaker") or "SPEAKER_UNKNOWN").replace(" ", "_")
+            speaker_id = f"{manifest_dir.name}_{speaker_label}"
+            language = segment.get("language") or "unknown"
+            duration = float(max(0.0, (segment.get("end") or 0) - (segment.get("start") or 0)))
+
+            entry = {
+                "id": clip_id,
+                "text": text,
+                "audio": f"{self.output_root.name}/audio/{dest_name}",
+                "speaker": speaker_id,
+                "language": language,
+                "duration": round(duration, 2),
+                "source": audio_path.name,
+            }
+            self._jsonl_handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            self._jsonl_handle.flush()
+            self.new_segments += 1
+
+        self.processed_bases.add(base_id)
+
+    def close(self) -> None:
+        if not self._jsonl_handle.closed:
+            self._jsonl_handle.close()
+
+    def summary(self) -> str:
+        added_files = len(self.processed_bases) - self.initial_processed
+        return (
+            f"Emilia Pipe complete. Added {added_files} files, {self.new_segments} segments.\n"
+            f"Results stored in {self.jsonl_path}"
+        )
+
+
+def transcribe_interface(project: str, language, silence_duration, purge_long_segments,
+                         max_segment_length, verbose_mode=False, resume_mode=False,
+                         slice_method_label="Silence Slicer",
+                         emilia_batch_size=16, emilia_whisper_arch="medium",
+                         emilia_do_uvr=True, emilia_threads=4, emilia_min_duration=0.25,
+                         emilia_hash_names: bool = False):
     if not project:
         return "No project selected."
     
@@ -502,7 +718,101 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
     train_text_folder = project_base / "train_text_files"
     train_txt_path = train_text_folder / "train.txt"
     
-    # Handle resume vs new run
+    slice_options = globals().get("SLICE_METHOD_OPTIONS", {})
+    slice_method = transcriber.SILENCE_SLICE_METHOD
+    if isinstance(slice_method_label, str):
+        mapped_value = slice_options.get(slice_method_label)
+        if mapped_value:
+            slice_method = mapped_value
+        elif slice_method_label.lower() in transcriber.VALID_SLICE_METHODS:
+            slice_method = slice_method_label.lower()
+    elif slice_method_label in transcriber.VALID_SLICE_METHODS:
+        slice_method = slice_method_label
+    
+    if slice_method == transcriber.EMILIA_PIPE_METHOD:
+        config_path = Path("Emilia/config.json")
+        if not config_path.is_file():
+            raise gr.Error(f"Emilia configuration not found at {config_path.resolve()}.")
+
+        processed_bases, entry_count, emilia_output_root, emilia_jsonl, saved_settings, settings_path = load_emilia_progress(project_base, project)
+        current_settings = {
+            "batch_size": int(emilia_batch_size),
+            "whisper_arch": emilia_whisper_arch,
+            "do_uvr": bool(emilia_do_uvr),
+            "threads": int(emilia_threads),
+            "min_duration": float(emilia_min_duration),
+            "hash_names": bool(emilia_hash_names),
+        }
+
+        audio_files = [
+            f for ext in VALID_AUDIO_EXTENSIONS
+            for f in wavs_folder.glob(f"*{ext}")
+        ]
+
+        if resume_mode:
+            if entry_count == 0:
+                return "No previous Emilia Pipe run found to resume. Please start a new run."
+            if saved_settings:
+                mismatched = [
+                    key for key, value in current_settings.items()
+                    if saved_settings.get(key, value) != value
+                ]
+                if mismatched:
+                    raise gr.Error(
+                        "Emilia Pipe settings differ from the previous run. "
+                        "Please restore the original settings or archive the prior output before starting a new run."
+                        f"\nMismatched keys: {', '.join(mismatched)}."
+                    )
+            audio_files = [f for f in audio_files if f.stem not in processed_bases]
+            if not audio_files:
+                return "Resume complete: All files have already been processed."
+
+            writer = EmiliaOutputWriter(
+                project,
+                emilia_output_root,
+                emilia_jsonl,
+                settings_path,
+                processed_bases,
+                resume_mode=True,
+            )
+        else:
+            if entry_count > 0:
+                raise gr.Error(
+                    "Emilia Pipe results already exist for this project. "
+                    "Please use Resume or archive the previous run before starting a new one."
+                )
+
+            writer = EmiliaOutputWriter(
+                project,
+                emilia_output_root,
+                emilia_jsonl,
+                settings_path,
+                processed_bases=set(),
+                resume_mode=False,
+                settings_to_save=current_settings,
+            )
+
+        try:
+            run_emilia_pipeline(
+                config_path,
+                input_folder=str(wavs_folder),
+                batch_size=int(emilia_batch_size),
+                compute_type="float16",
+                whisper_arch=emilia_whisper_arch,
+                threads=int(emilia_threads),
+                do_uvr=bool(emilia_do_uvr),
+                selected_files=audio_files,
+                on_result=writer.append,
+                min_duration=float(emilia_min_duration),
+                forced_language=str(language).strip() if language else None,
+                hash_names=bool(emilia_hash_names),
+            )
+        finally:
+            writer.close()
+
+        return writer.summary()
+
+    # Handle resume vs new run for other slicers
     if resume_mode:
         can_resume, processed_files, starting_index, status_msg = get_resume_status(project)
         if not can_resume:
@@ -510,7 +820,6 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
         
         logger.info(f"Resuming transcription: {status_msg}")
         
-        # Get unprocessed files
         audio_files = [
             f for ext in VALID_AUDIO_EXTENSIONS
             for f in wavs_folder.glob(f"*{ext}")
@@ -518,14 +827,14 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
         ]
         
     else:
-        # New run - check for conflicts
         if transcribe_folder.exists():
-            raise gr.Error(f"Transcribe folder already exists. Please remove previous run and try again, or use Resume mode.")
+            has_transcribe_outputs = any(transcribe_folder.iterdir())
+            if has_transcribe_outputs:
+                raise gr.Error(f"Transcribe folder already exists. Please remove previous run and try again, or use Resume mode.")
         
         if train_txt_path.exists():
             raise gr.Error(f"Train text file already exists. Please remove previous run and try again, or use Resume mode.")
         
-        # Create folders
         transcribe_folder.mkdir(parents=True, exist_ok=True)
         train_text_folder.mkdir(parents=True, exist_ok=True)
         
@@ -540,9 +849,11 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
             return "Resume complete: All files have been processed."
         else:
             return "No valid audio files found in the 'wavs' folder."
-    
+
     try:
         model = transcriber.load_whisperx_model("large-v3")
+        
+        logger.info(f"Starting transcription using slice method '{slice_method}'.")
         
         for i, audio_file in enumerate(audio_files, 1):
             logger.info(f"Processing file {i}/{len(audio_files)}: {audio_file.name}")
@@ -552,13 +863,15 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
                 model=model,
                 output_base=transcribe_folder,
                 train_txt_path=train_txt_path,
-                silence_duration_sec=silence_duration,
-                purge_long_segments=purge_long_segments,
-                max_segment_length=max_segment_length,
-                starting_index=starting_index,
-                language=language
-            )
-            
+                    silence_duration_sec=silence_duration,
+                    purge_long_segments=purge_long_segments,
+                    max_segment_length=max_segment_length,
+                    verbose_mode=verbose_mode,
+                    starting_index=starting_index,
+                    language=language,
+                    slice_method=slice_method
+                )
+    
         if train_txt_path.exists():
             with open(train_txt_path, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -571,19 +884,25 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
         return f"Error during transcription: {str(e)}"
 
 def move_previous_run(project: str):
-    project_base = DATASETS_FOLDER / project
+    project_slug = Path(project).name
+    project_base = DATASETS_FOLDER / project_slug
     transcribe_folder = project_base / "transcribe"
     train_text_folder = project_base / "train_text_files"
     train_txt_path = train_text_folder / "train.txt"
+    emilia_output_dir = project_base / f"{project_slug}_emilia_dataset"
     old_runs_folder = project_base / "old_runs"
     
     # Get current date and time for folder naming
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    destination_root = old_runs_folder / f"{timestamp}"
+    destination_root.mkdir(parents=True, exist_ok=True)
     
     if transcribe_folder.exists():
-        shutil.move(transcribe_folder, old_runs_folder / f"{timestamp}" / "transcribe_audio_folder")
+        shutil.move(transcribe_folder, destination_root / "transcribe_audio_folder")
     if train_txt_path.exists():
-        shutil.move(train_txt_path, old_runs_folder / f"{timestamp}")
+        shutil.move(train_txt_path, destination_root)
+    if emilia_output_dir.exists():
+        shutil.move(emilia_output_dir, destination_root / emilia_output_dir.name)
     return f"Previous run moved to '{timestamp}' in the old_runs folder."
 
 def correct_transcription_interface(project: str):
@@ -799,12 +1118,87 @@ def setup_gradio():
                 )
                 
                 with gr.Row():
-                    language = gr.Dropdown(label="Language", choices=WHISPER_LANGUAGES,
-                                            value="en", interactive=True)
-                    silence_duration = gr.Slider(label="Silence Duration (seconds)", minimum=1, maximum=10, value=6, step=1)
+                    language = gr.Dropdown(
+                        label="Language",
+                        choices=WHISPER_LANGUAGES,
+                        value="en",
+                        interactive=True,
+                    )
+                    slice_method_dropdown = gr.Dropdown(
+                        label="Slicing Method",
+                        choices=list(SLICE_METHOD_OPTIONS.keys()),
+                        value=DEFAULT_SLICE_METHOD_LABEL,
+                        interactive=True,
+                    )
+                with gr.Row():
+                    silence_duration = gr.Slider(
+                        label="Silence Duration (seconds)",
+                        minimum=1,
+                        maximum=10,
+                        value=6,
+                        step=1,
+                    )
+                emilia_options = gr.Group(visible=False)
+                with emilia_options:
+                    emilia_batch_slider = gr.Slider(
+                        label="Emilia Batch Size",
+                        minimum=1,
+                        maximum=64,
+                        step=1,
+                        value=16,
+                    )
+                    emilia_whisper_dropdown = gr.Dropdown(
+                        label="Emilia Whisper Model",
+                        choices=["small", "medium", "large-v2", "large-v3"],
+                        value="medium",
+                    )
+                    emilia_uvr_checkbox = gr.Checkbox(
+                        label="Run UVR Separation",
+                        value=True,
+                    )
+                    emilia_threads_slider = gr.Slider(
+                        label="Emilia Whisper Threads",
+                        minimum=1,
+                        maximum=16,
+                        step=1,
+                        value=4,
+                    )
+                    emilia_min_duration_slider = gr.Slider(
+                        label="Min Segment Duration (seconds)",
+                        minimum=0.1,
+                        maximum=5.0,
+                        step=0.05,
+                        value=0.25,
+                    )
+                    emilia_hash_checkbox = gr.Checkbox(
+                        label="Use File Hash Naming",
+                        value=False,
+                    )
+                emilia_min_duration_state = gr.State(0.25)
+                emilia_min_duration_slider.change(
+                    fn=lambda value: float(value),
+                    inputs=emilia_min_duration_slider,
+                    outputs=emilia_min_duration_state,
+                )
+
+                def _update_slice_controls(label):
+                    method = SLICE_METHOD_OPTIONS.get(label, str(label).lower())
+                    silence_enabled = method == transcriber.SILENCE_SLICE_METHOD
+                    emilia_visible = method == transcriber.EMILIA_PIPE_METHOD
+                    return (
+                        gr.update(interactive=silence_enabled),
+                        gr.update(visible=emilia_visible),
+                    )
+
+                slice_method_dropdown.change(
+                    fn=_update_slice_controls,
+                    inputs=slice_method_dropdown,
+                    outputs=[silence_duration, emilia_options],
+                )
                 with gr.Row():
                     purge_checkbox = gr.Checkbox(label="Purge segments longer than threshold", value=False)
                     max_segment_length_slider = gr.Slider(label="Max Segment Length (seconds)", minimum=1, maximum=60, value=12, step=1)
+                verbose_checkbox = gr.Checkbox(label="Verbose (keep short/blank segments)", value=True)
                 
                 with gr.Row():
                     transcribe_button = gr.Button("Start New Transcription", variant="primary")
@@ -814,13 +1208,71 @@ def setup_gradio():
                 transcribe_output = gr.Textbox(label="train.txt Content", lines=10)
                 
                 transcribe_button.click(
-                    fn=lambda proj, lang, silence, purge, max_len: transcribe_interface(proj, lang, silence, purge, max_len, resume_mode=False),
-                    inputs=[projects_dropdown, language, silence_duration, purge_checkbox, max_segment_length_slider],
+                    fn=lambda proj, lang, silence, purge, max_len, verbose, slice_choice, em_batch, em_whisper, em_uvr, em_threads, em_min_dur, em_hash: transcribe_interface(
+                        proj,
+                        lang,
+                        silence,
+                        purge,
+                        max_len,
+                        verbose,
+                        resume_mode=False,
+                        slice_method_label=slice_choice,
+                        emilia_batch_size=em_batch,
+                        emilia_whisper_arch=em_whisper,
+                        emilia_do_uvr=em_uvr,
+                        emilia_threads=em_threads,
+                        emilia_min_duration=em_min_dur,
+                        emilia_hash_names=em_hash,
+                    ),
+                    inputs=[
+                        projects_dropdown,
+                        language,
+                        silence_duration,
+                        purge_checkbox,
+                        max_segment_length_slider,
+                        verbose_checkbox,
+                        slice_method_dropdown,
+                        emilia_batch_slider,
+                        emilia_whisper_dropdown,
+                        emilia_uvr_checkbox,
+                        emilia_threads_slider,
+                        emilia_min_duration_state,
+                        emilia_hash_checkbox,
+                    ],
                     outputs=transcribe_output,
                 )
                 resume_button.click(
-                    fn=lambda proj, lang, silence, purge, max_len: transcribe_interface(proj, lang, silence, purge, max_len, resume_mode=True),
-                    inputs=[projects_dropdown, language, silence_duration, purge_checkbox, max_segment_length_slider],
+                    fn=lambda proj, lang, silence, purge, max_len, verbose, slice_choice, em_batch, em_whisper, em_uvr, em_threads, em_min_dur, em_hash: transcribe_interface(
+                        proj,
+                        lang,
+                        silence,
+                        purge,
+                        max_len,
+                        verbose,
+                        resume_mode=True,
+                        slice_method_label=slice_choice,
+                        emilia_batch_size=em_batch,
+                        emilia_whisper_arch=em_whisper,
+                        emilia_do_uvr=em_uvr,
+                        emilia_threads=em_threads,
+                        emilia_min_duration=em_min_dur,
+                        emilia_hash_names=em_hash,
+                    ),
+                    inputs=[
+                        projects_dropdown,
+                        language,
+                        silence_duration,
+                        purge_checkbox,
+                        max_segment_length_slider,
+                        verbose_checkbox,
+                        slice_method_dropdown,
+                        emilia_batch_slider,
+                        emilia_whisper_dropdown,
+                        emilia_uvr_checkbox,
+                        emilia_threads_slider,
+                        emilia_min_duration_state,
+                        emilia_hash_checkbox,
+                    ],
                     outputs=transcribe_output,
                 )
                 move_previous_run_button.click(
@@ -918,24 +1370,35 @@ def setup_gradio():
                 gr.Markdown("### Export All Transcribe Folders into a Single Dataset Folder")
                 gr.Markdown("This will copy all files from subfolders (and files directly in the folder) of the project's 'transcribe' folder into a single folder named '<project>_dataset'.")
                 
-                higgs_format_checkbox = gr.Checkbox(label="Export in Higgs format", value=False, info="Generate metadata.json and speaker-named files for Higgs Audio training")
-                
+                export_format_dropdown = gr.Dropdown(label="Export Format", choices=["Base", "Higgs", "Vibevoice"], value="Base")
+
                 with gr.Row(visible=False) as higgs_options:
                     speaker_id_input = gr.Textbox(label="Speaker ID", placeholder="e.g., alma_speaker, melina_speaker", info="Used for Higgs format file naming", scale=2)
                     gender_dropdown = gr.Dropdown(choices=["male", "female", "unknown"], value="unknown", label="Gender", scale=1)
-                
+
+                with gr.Row(visible=False) as vibevoice_options:
+                    vibevoice_jsonl_input = gr.Textbox(label="JSONL Name", placeholder="e.g., vibevoice_train", info="Filename (without extension) for the JSONL manifest", scale=2)
+
                 export_dataset_button = gr.Button("Export Dataset")
                 export_dataset_status = gr.Textbox(label="Status", lines=2)
                 
-                higgs_format_checkbox.change(
-                    fn=lambda x: gr.update(visible=x),
-                    inputs=higgs_format_checkbox,
-                    outputs=higgs_options,
+                def update_export_options(format_choice):
+                    is_higgs = format_choice == "Higgs"
+                    is_vibevoice = format_choice == "Vibevoice"
+                    return (
+                        gr.update(visible=is_higgs),
+                        gr.update(visible=is_vibevoice),
+                    )
+                
+                export_format_dropdown.change(
+                    fn=update_export_options,
+                    inputs=export_format_dropdown,
+                    outputs=[higgs_options, vibevoice_options],
                 )
                 
                 export_dataset_button.click(
                     fn=export_dataset,
-                    inputs=[projects_dropdown, higgs_format_checkbox, speaker_id_input, gender_dropdown],
+                    inputs=[projects_dropdown, export_format_dropdown, speaker_id_input, gender_dropdown, vibevoice_jsonl_input],
                     outputs=export_dataset_status,
                 )
 
@@ -958,6 +1421,11 @@ if __name__ == "__main__":
 
     # Import your custom utilities.
     from gradio_utils import utils as gu
+    from emilia_pipeline import run_emilia_pipeline
+    
+    from safe_globals import register_torch_safe_globals
+
+    register_torch_safe_globals()
     # =============================================================================
     # Global Project Folder
     # =============================================================================
@@ -980,4 +1448,11 @@ if __name__ == "__main__":
     }
     VALID_AUDIO_EXTENSIONS = [".wav", ".mp3", ".m4a", ".opus", ".webm", ".mp4", ".ogg"]
     WHISPER_LANGUAGES = ["af","am","ar","as","az","ba","be","bg","bn","bo","br","bs","ca","cs","cy","da","de","el","en","es","et","eu","fa","fi","fo","fr","gl","gu","ha","haw","he","hi","hr","ht","hu","hy","id","is","it","ja","jw","ka","kk","km","kn","ko","la","lb","ln","lo","lt","lv","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","nl","nn","no","oc","pa","pl","ps","pt","ro","ru","sa","sd","si","sk","sl","sn","so","sq","sr","su","sv","sw","ta","te","tg","th","tk","tl","tr","tt","uk","ur","uz","vi","yi","yo","yue","zh"]
+    SLICE_METHOD_OPTIONS = {
+        "WhisperX Timestamps": transcriber.WHISPERX_SLICE_METHOD,
+        "Silence Slicer": transcriber.SILENCE_SLICE_METHOD,
+        "Emilia Pipe": transcriber.EMILIA_PIPE_METHOD,
+        
+    }
+    DEFAULT_SLICE_METHOD_LABEL = "WhisperX Timestamps"
     main()

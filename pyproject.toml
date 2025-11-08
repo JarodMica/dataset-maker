@@ -3,18 +3,31 @@ name = "dataset-maker"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = "==3.11.11"
+requires-python = ">=3.10"
 dependencies = [
+    "audioread>=3.0.1",
+    "beartype>=0.22.2",
+    "datasets==3.6.0",
+    "demucs>=4.0.1",
     "gradio-utils",
     "librosa>=0.11.0",
     "llama-cpp-python==0.2.64",
+    "matchering>=2.0.6",
+    "onnx>=1.19.1",
+    "onnx2pytorch>=0.5.3",
+    "onnxruntime-gpu>=1.20.2",
+    "pyannote-audio==4.0.1",
+    "pydub>=0.25.1",
+    "pyrubberband>=0.4.0",
     "pysrt>=1.1.2",
+    "pytorch-lightning==1.9.0",
     "rapidfuzz>=3.13.0",
     "requests==2.32.3",
+    "rotary-embedding-torch>=0.8.9",
+    "soundfile>=0.13.1",
     "starlette==0.38.2",
-    "torch==2.5.1",
-    "torchaudio==2.5.1",
-    "torchvision==0.20.1",
+    "torch>=2.8.0",
+    "torchcodec==0.8",
     "urllib3==2.3",
     "whisperx>=3.3.4",
 ]
@@ -24,17 +37,31 @@ override-dependencies = [
     "numpy<2.0",
     "pydantic<=2.10.6",
     "gradio==4.44.1",
-    "urllib3>=2.0"]
+    "urllib3>=2.0",
+    "pyannote-audio==4.0.1"]
 
 [tool.uv.sources]
 gradio-utils = { git = "https://github.com/JarodMica/gradio_utils.git" }
 whisperx = { git = "https://github.com/m-bain/whisperX.git", rev = "44e8bf5bb658ad6e1a80585b987fae2d48b9662c" }
+torch = [
+  { index = "pytorch-cu128", extra = "cu128" },
+]
+torchvision = [
+  { index = "pytorch-cu128", extra = "cu128" },
+]
+torchaudio = [
+  { index = "pytorch-cu128", extra = "cu128" },
+]
+
+
+[project.optional-dependencies]
+cu128 = [
+  "torch==2.8.0",
+  "torchvision==0.23.0",
+  "torchaudio<2.9"
+]
 
 [[tool.uv.index]]
-url = "https://abetlen.github.io/llama-cpp-python/whl/cu121"
-
-[[tool.uv.index]]
-url = "https://download.pytorch.org/whl/cu121"
-
-[tool.pyright]
-exclude = ["LLM Models"]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
