@@ -876,10 +876,10 @@ requires-dist = [
     { name = "soundfile", specifier = ">=0.13.1" },
     { name = "starlette", specifier = "==0.38.2" },
     { name = "torch", specifier = ">=2.8.0" },
-    { name = "torch", marker = "extra == 'cu128'", specifier = ">=2.7.1", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "dataset-maker", extra = "cu128" } },
+    { name = "torch", marker = "extra == 'cu128'", specifier = "==2.8.0", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "dataset-maker", extra = "cu128" } },
     { name = "torchaudio", marker = "extra == 'cu128'", specifier = "<2.9", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "dataset-maker", extra = "cu128" } },
     { name = "torchcodec", specifier = "==0.8" },
-    { name = "torchvision", marker = "extra == 'cu128'", specifier = ">=0.22.1", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "dataset-maker", extra = "cu128" } },
+    { name = "torchvision", marker = "extra == 'cu128'", specifier = "==0.23.0", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "dataset-maker", extra = "cu128" } },
     { name = "urllib3", specifier = "==2.3" },
     { name = "whisperx", git = "https://github.com/m-bain/whisperX.git?rev=44e8bf5bb658ad6e1a80585b987fae2d48b9662c" },
 ]

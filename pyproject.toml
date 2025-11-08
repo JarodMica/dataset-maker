@@ -56,8 +56,8 @@ torchaudio = [
 
 [project.optional-dependencies]
 cu128 = [
-  "torch>=2.7.1",
-  "torchvision>=0.22.1",
+  "torch==2.8.0",
+  "torchvision==0.23.0",
   "torchaudio<2.9"
 ]
 
