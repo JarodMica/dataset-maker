@@ -539,6 +539,30 @@ def export_results(audio: AudioDict, segments: List[Segment], save_dir: Path) ->
     return manifest
 
 
+def _cleanup_processed_artifacts(manifest_path: Path, *, logger: Optional[Any] = None) -> None:
+    """
+    Remove the per-file processed directory (and its parent *_processed folder if empty).
+    Mirrors the Gradio-side cleanup to keep disk usage manageable when intermediate
+    artifacts are no longer needed.
+    """
+    manifest_dir = manifest_path.parent
+    if not manifest_dir.exists():
+        return
+
+    parent_dir = manifest_dir.parent
+    if not parent_dir.name.endswith("_processed"):
+        return
+
+    log = logger or Logger.get_logger()
+    try:
+        shutil.rmtree(manifest_dir, ignore_errors=True)
+        if parent_dir.exists() and not any(parent_dir.iterdir()):
+            shutil.rmtree(parent_dir, ignore_errors=True)
+        log.debug("Removed processed artifacts under %s", manifest_dir)
+    except Exception as exc:
+        log.warning("Failed to clean processed folder %s: %s", manifest_dir, exc)
+
+
 def process_audio(
     audio_path: Path,
     *,
@@ -841,6 +865,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use deterministic file-hash IDs instead of original filenames.",
     )
+    parser.add_argument(
+        "--keep-processed",
+        dest="keep_processed",
+        action="store_true",
+        help="Retain the Emilia *_processed folders after export (default).",
+    )
+    parser.add_argument(
+        "--cleanup-processed",
+        dest="keep_processed",
+        action="store_false",
+        help="Delete Emilia *_processed folders after results are consumed.",
+    )
+    parser.set_defaults(keep_processed=True)
     return parser.parse_args()
 
 
@@ -856,6 +893,7 @@ def run_emilia_pipeline(
     min_duration: Optional[float] = None,
     forced_language: Optional[str] = None,
     hash_names: bool = False,
+    emilia_keep_processed: bool = True,
     selected_files: Optional[List[Union[str, Path]]] = None,
     on_result: Optional[Callable[[Path, Path, List[Segment]], None]] = None,
 ) -> List[Tuple[Path, List[Segment]]]:
@@ -873,6 +911,7 @@ def run_emilia_pipeline(
         min_duration: override minimum allowed segment duration (seconds)
         forced_language: override Whisper language (disables multilingual detection)
         hash_names: derive output IDs from file hashes instead of original names
+        emilia_keep_processed: keep the *_processed folders (set False to delete after use)
         selected_files: optional subset of files (by stem/path) to process
         on_result: optional callback invoked after each file is processed
 
@@ -963,6 +1002,8 @@ def run_emilia_pipeline(
         if on_result:
             on_result(audio_path, manifest, segments)
         results.append((manifest, segments))
+        if not emilia_keep_processed:
+            _cleanup_processed_artifacts(manifest, logger=logger)
     return results
 
 
@@ -978,6 +1019,7 @@ def main() -> None:
         min_duration=args.min_duration,
         forced_language=args.language,
         hash_names=args.hash_names,
+        emilia_keep_processed=args.keep_processed,
     )
 
 
