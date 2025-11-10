@@ -621,6 +621,7 @@ class EmiliaOutputWriter:
         *,
         resume_mode: bool = False,
         settings_to_save: Optional[Dict[str, Any]] = None,
+        cleanup_processed: bool = False,
     ) -> None:
         self.project_name = project_name
         self.output_root = output_root
@@ -630,6 +631,7 @@ class EmiliaOutputWriter:
         self.processed_bases = set(processed_bases or set())
         self.initial_processed = len(self.processed_bases)
         self.new_segments = 0
+        self.cleanup_processed = bool(cleanup_processed)
 
         if not resume_mode and self.output_root.exists():
             shutil.rmtree(self.output_root)
@@ -653,6 +655,7 @@ class EmiliaOutputWriter:
         manifest_dir = manifest_path.parent
         if not segments:
             self.processed_bases.add(base_id)
+            self._cleanup_processed_dir(manifest_dir)
             return
 
         for idx, segment in enumerate(segments):
@@ -687,6 +690,7 @@ class EmiliaOutputWriter:
             self.new_segments += 1
 
         self.processed_bases.add(base_id)
+        self._cleanup_processed_dir(manifest_dir)
 
     def close(self) -> None:
         if not self._jsonl_handle.closed:
@@ -699,13 +703,27 @@ class EmiliaOutputWriter:
             f"Results stored in {self.jsonl_path}"
         )
 
+    def _cleanup_processed_dir(self, manifest_dir: Path) -> None:
+        if not self.cleanup_processed:
+            return
+        try:
+            parent_dir = manifest_dir.parent
+            if not parent_dir.name.endswith("_processed"):
+                return
+            shutil.rmtree(manifest_dir, ignore_errors=True)
+            # Remove the parent wavs_processed folder if it became empty.
+            if parent_dir.exists() and not any(parent_dir.iterdir()):
+                shutil.rmtree(parent_dir, ignore_errors=True)
+        except Exception as exc:
+            logger.warning("Failed to clean processed folder %s: %s", manifest_dir, exc)
+
 
 def transcribe_interface(project: str, language, silence_duration, purge_long_segments,
                          max_segment_length, verbose_mode=False, resume_mode=False,
                          slice_method_label="Silence Slicer",
                          emilia_batch_size=16, emilia_whisper_arch="medium",
                          emilia_do_uvr=True, emilia_threads=4, emilia_min_duration=0.25,
-                         emilia_hash_names: bool = False):
+                         emilia_hash_names: bool = False, emilia_keep_processed: bool = True):
     if not project:
         return "No project selected."
     
@@ -742,6 +760,7 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
             "threads": int(emilia_threads),
             "min_duration": float(emilia_min_duration),
             "hash_names": bool(emilia_hash_names),
+            "keep_processed": bool(emilia_keep_processed),
         }
 
         audio_files = [
@@ -774,6 +793,7 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
                 settings_path,
                 processed_bases,
                 resume_mode=True,
+                cleanup_processed=not bool(emilia_keep_processed),
             )
         else:
             if entry_count > 0:
@@ -790,6 +810,7 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
                 processed_bases=set(),
                 resume_mode=False,
                 settings_to_save=current_settings,
+                cleanup_processed=not bool(emilia_keep_processed),
             )
 
         try:
@@ -806,6 +827,7 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
                 min_duration=float(emilia_min_duration),
                 forced_language=str(language).strip() if language else None,
                 hash_names=bool(emilia_hash_names),
+                emilia_keep_processed=bool(emilia_keep_processed),
             )
         finally:
             writer.close()
@@ -1174,6 +1196,10 @@ def setup_gradio():
                         label="Use File Hash Naming",
                         value=False,
                     )
+                    emilia_keep_checkbox = gr.Checkbox(
+                        label="Keep processed wav files",
+                        value=False,
+                    )
                 emilia_min_duration_state = gr.State(0.25)
                 emilia_min_duration_slider.change(
                     fn=lambda value: float(value),
@@ -1208,7 +1234,7 @@ def setup_gradio():
                 transcribe_output = gr.Textbox(label="train.txt Content", lines=10)
                 
                 transcribe_button.click(
-                    fn=lambda proj, lang, silence, purge, max_len, verbose, slice_choice, em_batch, em_whisper, em_uvr, em_threads, em_min_dur, em_hash: transcribe_interface(
+                    fn=lambda proj, lang, silence, purge, max_len, verbose, slice_choice, em_batch, em_whisper, em_uvr, em_threads, em_min_dur, em_hash, em_keep: transcribe_interface(
                         proj,
                         lang,
                         silence,
@@ -1223,6 +1249,7 @@ def setup_gradio():
                         emilia_threads=em_threads,
                         emilia_min_duration=em_min_dur,
                         emilia_hash_names=em_hash,
+                        emilia_keep_processed=em_keep
                     ),
                     inputs=[
                         projects_dropdown,
@@ -1238,11 +1265,12 @@ def setup_gradio():
                         emilia_threads_slider,
                         emilia_min_duration_state,
                         emilia_hash_checkbox,
+                        emilia_keep_checkbox
                     ],
                     outputs=transcribe_output,
                 )
                 resume_button.click(
-                    fn=lambda proj, lang, silence, purge, max_len, verbose, slice_choice, em_batch, em_whisper, em_uvr, em_threads, em_min_dur, em_hash: transcribe_interface(
+                    fn=lambda proj, lang, silence, purge, max_len, verbose, slice_choice, em_batch, em_whisper, em_uvr, em_threads, em_min_dur, em_hash, em_keep: transcribe_interface(
                         proj,
                         lang,
                         silence,
@@ -1257,6 +1285,7 @@ def setup_gradio():
                         emilia_threads=em_threads,
                         emilia_min_duration=em_min_dur,
                         emilia_hash_names=em_hash,
+                        emilia_keep_processed=em_keep
                     ),
                     inputs=[
                         projects_dropdown,
@@ -1272,6 +1301,7 @@ def setup_gradio():
                         emilia_threads_slider,
                         emilia_min_duration_state,
                         emilia_hash_checkbox,
+                        emilia_keep_checkbox
                     ],
                     outputs=transcribe_output,
                 )
