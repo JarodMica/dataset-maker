@@ -53,3 +53,23 @@ Dataset_name
     ```
     uv run .\gradio_interface.py
     ```
+
+## Onnx Runtime Issue CUDA
+CUDAExecution provider may not be found even when using uv. The fix for this is to remove and then add `optimum[onnxruntime-gpu]` in the terminal
+
+### Problematic
+```
+uv run python
+>>> import onnxruntime as ort
+>>> print("Available providers:", ort.get_available_providers())
+Available providers: ['AzureExecutionProvider', 'CPUExecutionProvider']
+```
+
+### Fixed
+```
+uv run python
+>>> import onnxruntime as ort
+>>> print("Available providers:", ort.get_available_providers())
+Available providers: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+```
+
